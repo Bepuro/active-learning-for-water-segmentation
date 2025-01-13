@@ -3,160 +3,110 @@ _base_ = [
     '../../configs/_base_/default_runtime.py',
 ]
 
-
 custom_imports = dict(
-    imports=['mmseg.datasets.transforms'],
+    imports=['mmseg.datasets.transforms'],  # чтобы RandomCrop и др. зарегистрировались
     allow_failed_imports=False
 )
 
-norm_cfg = dict(type='BN', requires_grad=True)
-dataset_type = 'LandcoverAI'
+dataset_type = 'LandcoverAI'  # <-- используем LandcoverAL (один класс)
 
-# Путь к папке с набором данных
-data_root = '/misc/home1/m_imm_freedata/Segmentation/Projects/mmseg_water/landcover.ai_512'
-
-num_classes = 2
+data_root = '/path/to/data_root'  # Укажите ваш путь
 crop_size = (512, 512)
-max_epochs = 100
-
-loss = dict(type='FocalLoss', class_weight=[0.9, 1.1])
-
-batch_size = 16
-gradient_accumulation_steps = 8
-actual_batch_size = batch_size * gradient_accumulation_steps
-
-num_workers = 8
-
-optimizer = dict(type='AdamW', lr=3e-4, weight_decay=0.001)
-
-experiment_name = f'Poolformer_{dataset_type}_{crop_size[0]}_{loss["type"]}_{optimizer["type"]}_bsize_{actual_batch_size}'
-logs_dir = 'logs'
-work_dir = f'{logs_dir}/{experiment_name}'
-log_interval = 10
-splits = 'splits'
-
-img_norm_cfg = dict(
-    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
-data_preprocessor = dict(size=crop_size)
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations'),
-    dict(
-        type='RandomResize',
-        scale=(2048, 512),
-        ratio_range=(0.5, 2.0),
-        keep_ratio=True),
-    #dict(type='RandomCrop',crop_size=(512, 512), cat_max_ratio=0.75),
+    dict(type='RandomResize', scale=(2048, 512), ratio_range=(0.5, 2.0), keep_ratio=True),
+    dict(type='RandomCrop', crop_size=crop_size, cat_max_ratio=0.75),
     dict(type='RandomFlip', prob=0.5),
-    #dict(type='PhotoMetricDistortion'),
-    #dict(type='PackSegInputs')
+    dict(type='PhotoMetricDistortion'),
+    dict(type='PackSegInputs')
 ]
 test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='Resize', scale=(2048, 512), keep_ratio=True),
     dict(type='ResizeToMultiple', size_divisor=32),
-    dict(type='LoadAnnotations', reduce_zero_label=False),
+    dict(type='LoadAnnotations'),
     dict(type='PackSegInputs')
 ]
-checkpoint_file = 'https://download.openmmlab.com/mmclassification/v0/poolformer/poolformer-m48_3rdparty_32xb128_in1k_20220414-9378f3eb.pth'
 
 model = dict(
-    data_preprocessor=data_preprocessor,
+    data_preprocessor=dict(size=crop_size),
     backbone=dict(
         arch='m48',
         init_cfg=dict(
             type='Pretrained',
-            checkpoint=checkpoint_file,
+            checkpoint='https://download.openmmlab.com/...poolformer.pth',
             prefix='backbone.'
         )
     ),
     neck=dict(in_channels=[96, 192, 384, 768])
 )
 
-log_processor = dict(by_epoch=True)
-
+# Пример оптимизатора, шедулера
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=optimizer,
-    clip_grad=None,
-    accumulative_counts=gradient_accumulation_steps,
+    optimizer=dict(type='AdamW', lr=3e-4, weight_decay=0.001),
 )
 
-param_scheduler = [
-    dict(
-        type='LinearLR',
-        start_factor=3e-2,
-        begin=0,
-        end=45,
-        by_epoch=True,
-    ),
-    dict(
-        type='PolyLRRatio',
-        eta_min_ratio=3e-2,
-        power=0.9,
-        begin=45,
-        end=90,
-        by_epoch=True,
-    ),
-    dict(
-        type='ConstantLR',
-        by_epoch=True,
-        factor=1,
-        begin=90,
-        end=100,
-    )
-]
-
-val_cfg = dict(type='ValLoop')
-test_cfg = dict(type='TestLoop')
-train_cfg = dict(max_epochs=max_epochs, type='EpochBasedTrainLoop', val_interval=1)
-
-default_hooks = dict(
-    logger=dict(type='LoggerHook', log_metric_by_epoch=True, interval=log_interval),
-    checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=1, max_keep_ckpts=1, save_best='mIoU'),
-    visualization=dict(type='SegVisualizationHook', draw=False, interval=500)
-)
-
+# Dataloaders
 train_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=num_workers,
-    persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    batch_size=4,
+    num_workers=2,
     dataset=dict(
-        type=dataset_type,
-        data_root=data_root,
-        data_prefix=dict(
-            img_path='train/images',
-            seg_map_path='train/gt'
-        ),
-        pipeline=train_pipeline,
-    )
+        type='LandcoverAI',
+        data_root='/misc/home1/m_imm_freedata/Segmentation/Projects/mmseg_water/landcover.ai_512',  
+        ann_file='dataset_coco.json',      # <-- Пусть по умолчанию
+        pipeline=[ ... ]
+    ),
+    sampler=dict(type='DefaultSampler', shuffle=True)
 )
 
 val_dataloader = dict(
-    batch_size=batch_size,
-    num_workers=num_workers,
-    persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    batch_size=1,
+    num_workers=2,
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        data_prefix=dict(
-            img_path='val/images',
-            seg_map_path='val/gt'
-        ),
-        pipeline=test_pipeline,
-    )
+        ann_file='val.json',   # или val/images, val/gt и т.д.
+        data_prefix=dict(img_path='val/images', seg_map_path='val/gt'),
+        pipeline=test_pipeline
+    ),
+    sampler=dict(type='DefaultSampler', shuffle=False)
 )
-
 test_dataloader = val_dataloader
 
 val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU'])
 test_evaluator = val_evaluator
 
-vis_backends = [
-    dict(type='LocalVisBackend', scalar_save_file='../../scalars.json', save_dir=work_dir),
-    dict(type='TensorboardVisBackend', save_dir=work_dir)
-]
-visualizer = dict(type='SegLocalVisualizer', vis_backends=vis_backends, name='visualizer')
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=100, val_interval=1)
+val_cfg = dict(type='ValLoop')
+test_cfg = dict(type='TestLoop')
+
+default_hooks = dict(
+    checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=1, save_best='mIoU'),
+    logger=dict(type='LoggerHook', interval=10, log_metric_by_epoch=True)
+)
+
+experiment_name = 'AL_experiment'
+
+experiment_name = 'LandcoverAI'
+json_writer = dict(
+    type='JsonWriter',
+    data_file='dataset_coco.json',
+    initial_labeled_size=200,
+    labeled_size=100
+)
+
+active_learning_dataloader = dict(
+    batch_size=1,
+    num_workers=1,
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        ann_file='unlabeled.json',  # будет подменяться при AL
+        data_prefix=dict(img_path='train/images', seg_map_path='train/gt'),
+        pipeline=test_pipeline
+    ),
+    sampler=dict(type='DefaultSampler', shuffle=False)
+)

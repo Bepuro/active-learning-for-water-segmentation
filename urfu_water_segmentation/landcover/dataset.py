@@ -1,7 +1,7 @@
 from collections import defaultdict
 from mmseg.registry import DATASETS
 from mmseg.datasets import BaseSegDataset
-
+import os.path as osp
 
 DATASET_COLORMAP = dict(
     background=(0, 0, 0),
@@ -17,7 +17,6 @@ DATASET_CLASS_MAPPING = {
     'buildings': 'background',
 }
 
-
 @DATASETS.register_module()
 class LandcoverAI(BaseSegDataset):
     METAINFO = dict(
@@ -25,29 +24,29 @@ class LandcoverAI(BaseSegDataset):
         palette=list(DATASET_COLORMAP.values()),
     )
 
-    def __init__(self, **kwargs):
+    def __init__(self, ann_file=None, img_suffix='.tif', seg_map_suffix='.tif', **kwargs):
         new_classes = []
         self._data_label_map = {}
-        
         for key, value in DATASET_COLORMAP.items():
             new_key = DATASET_CLASS_MAPPING.get(key, key)
-            
             if new_key not in new_classes:
                 new_classes.append(new_key)
-            
             self._data_label_map[value[0]] = new_classes.index(new_key)
-            
+
+        if ann_file is None:
+            ann_file = ''
+
         super().__init__(
-            img_suffix=".tif",
-            seg_map_suffix=".tif",
+            ann_file=ann_file,
+            img_suffix=img_suffix,
+            seg_map_suffix=seg_map_suffix,
             metainfo={'classes': new_classes},
             **kwargs
         )
-        
+
     def get_data_info(self, idx):
         result = super().get_data_info(idx)
         if result is None:
             return None
-        
         result['label_map'] = self._data_label_map.copy()
         return result

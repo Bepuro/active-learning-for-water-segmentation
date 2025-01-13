@@ -1,0 +1,14 @@
+{
+  "images": [],
+  "annotations": [],
+  "categories": [
+    {
+      "id": 1,
+      "name": "background"
+    },
+    {
+      "id": 2,
+      "name": "object"
+    }
+  ]
+}

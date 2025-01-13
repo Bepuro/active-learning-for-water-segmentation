@@ -1,225 +1,133 @@
-# Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import logging
 import os
 import os.path as osp
-import random  # нужно для случайного перемешивания
+import time
 
 from mmengine.config import Config, DictAction
 from mmengine.logging import print_log
 from mmengine.runner import Runner
+from mmengine.registry import RUNNERS
+from mmengine.dist import get_dist_info
+from mmengine.fileio import dump
 
-from mmseg.registry import RUNNERS, DATASETS
+# Импортируем функции, написанные в al_mining/utils.py
+from al_mining.utils import patch_cfg, patch_runner
 
+# Импортируем наш JsonWriter и функцию подсчёта score (al_scores_single_gpu)
+from al_mining.registry import MINERS
+from al_mining.miners import JsonWriter, al_scores_single_gpu
 
-
-
-# Импортируем наш кастомный датасет (LandcoverAI)
+# Обязательно импортируем LandcoverAI (в котором ann_file может быть задан из конфига)
 from dataset import LandcoverAI
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train a segmentor')
-    parser.add_argument('config', help='train config file path')
-    parser.add_argument('--work-dir', help='the dir to save logs and models')
-    parser.add_argument(
-        '--resume',
-        action='store_true',
-        default=False,
-        help='resume from the latest checkpoint in the work_dir automatically')
-    parser.add_argument(
-        '--amp',
-        action='store_true',
-        default=False,
-        help='enable automatic-mixed-precision training')
-    parser.add_argument(
-        '--cfg-options',
-        nargs='+',
-        action=DictAction,
-        help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file. If the value to '
-        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
-        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
-        'Note that the quotation marks are necessary and that no white space '
-        'is allowed.')
-    parser.add_argument(
-        '--launcher',
-        choices=['none', 'pytorch', 'slurm', 'mpi'],
-        default='none',
-        help='job launcher')
-    # Когда PyTorch >= 2.0.0 используется torch.distributed.launch,
-    # оно будет передавать '--local-rank', а не '--local_rank'
-    parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
-
-    # Флаг для запуска режима активного обучения
-    parser.add_argument(
-        '--active-learning',
-        action='store_true',
-        default=False,
-        help='Enable Active Learning loop')
+    parser = argparse.ArgumentParser(description='Train LandcoverAI with Active Learning, storing labeled/unlabeled JSON.')
+    parser.add_argument('config', help='Path to config file')
+    parser.add_argument('--work-dir', help='Directory to save logs and models')
+    parser.add_argument('--resume', action='store_true', default=False, help='Resume training from last checkpoint')
+    parser.add_argument('--amp', action='store_true', default=False, help='Enable Automatic Mixed Precision')
+    parser.add_argument('--cfg-options', nargs='+', action=DictAction, help='Override config settings')
+    parser.add_argument('--launcher', choices=['none', 'pytorch', 'slurm', 'mpi'], default='none')
+    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--al_cycles', type=int, default=3, help='Number of Active Learning cycles')
 
     args = parser.parse_args()
+
+    # Устанавливаем LOCAL_RANK
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
 
     return args
 
 
-def active_learning_loop(cfg):
-    """Упрощённый пример цикла активного обучения с автоделением датасета."""
-
-    # Собираем единый датасет из описания (все данные размечены):
-    dataset_full = DATASETS.build(cfg.train_dataloader.dataset)
-
-    # Определяем, какую долю оставим размеченной (например, 10%)
-    labeled_fraction = 0.1
-    data_list = dataset_full.data_list[:]  # скопируем список
-    random.shuffle(data_list)
-    num_labeled = int(len(data_list) * labeled_fraction)
-
-    # Разбиваем на "размеченный" (labeled) и "неразмеченный" (unlabeled) по data_list
-    labeled_data_list = data_list[:num_labeled]
-    unlabeled_data_list = data_list[num_labeled:]
-
-    # Создаём два объекта датасета с разными data_list
-    labeled_dataset = DATASETS.build(cfg.train_dataloader.dataset)
-    labeled_dataset.data_list = labeled_data_list
-
-    unlabeled_dataset = DATASETS.build(cfg.train_dataloader.dataset)
-    unlabeled_dataset.data_list = unlabeled_data_list
-
-    # Строим DataLoader для размеченного датасета (на котором реально будем обучаться)
-    labeled_loader_cfg = cfg.train_dataloader.copy()
-    labeled_loader_cfg['dataset'] = labeled_dataset
-    labeled_loader_cfg['sampler'] = dict(type='DefaultSampler', shuffle=True)
-    labeled_dataloader = Runner.build_dataloader(labeled_loader_cfg)
-
-    # Готовим Runner
-    runner = Runner.from_cfg(cfg)
-
-    # Цикл активного обучения (3 итерации для примера)
-    num_al_iterations = 3
-    top_k = 10  # сколько самых "неуверенных" примеров переносить в каждом шаге
-
-    for al_iter in range(1, num_al_iterations + 1):
-        print_log(
-            f'\n[Active Learning] Start iteration {al_iter}/{num_al_iterations}',
-            logger='current', level=logging.INFO)
-
-        # Тренируемся на размеченной части
-        state_dict = runner.model.state_dict()
-
-        # Создаем новый runner (уже с новой конфигурацией)
-        new_runner = Runner.from_cfg(cfg)
-
-        # Загружаем веса в модель нового Runner
-        new_runner.model.load_state_dict(state_dict)
-
-        # Запускаем тренировку заново
-        new_runner.train()  # один полный цикл обучения на N эпох (указанных в cfg.train_cfg)
-
-        # Оценка неуверенности на "неразмеченной" части
-        uncertainty_scores = compute_uncertainty(unlabeled_dataset, runner)
-
-        # Выбираем top_k самых неуверенных
-        sorted_by_unc = sorted(uncertainty_scores, key=lambda x: x[1], reverse=True)
-        top_uncertain = sorted_by_unc[:top_k]
-
-        # "Размечаем" их (переносим из unlabeled_dataset в labeled_dataset)
-        print_log(
-            f'[Active Learning] Adding {top_k} most uncertain samples to the labeled set',
-            logger='current', level=logging.INFO)
-        move_samples_to_labeled(labeled_dataset, unlabeled_dataset, top_uncertain)
-
-        # Убедимся, что DataLoader знает о новом кол-ве данных
-        labeled_loader_cfg['dataset'] = labeled_dataset
-        labeled_dataloader = Runner.build_dataloader(labeled_loader_cfg)
-
-        # Если unlabeled_dataset опустел, завершаем AL
-        if len(unlabeled_dataset) == 0:
-            print_log('[Active Learning] Unlabeled pool is empty.', logger='current', level=logging.INFO)
-            break
-
-    print_log('[Active Learning] Finished all AL iterations.', logger='current', level=logging.INFO)
-
-
-def compute_uncertainty(dataset, runner):
-    """Пример функции, считающей «неуверенность» модели для каждого изображения.
-    Возвращает список кортежей (idx, score).
-    """
-    results = []
-    for idx in range(len(dataset)):
-        # В реальности здесь нужно выполнить forward модели runner.model,
-        # посчитать энтропию / дисперсию / etc. Мы же генерируем случайно.
-        score = random.random()
-        results.append((idx, score))
-    return results
-
-
-def move_samples_to_labeled(labeled_dataset, unlabeled_dataset, top_uncertain):
-    """Переносит выбранные индексы из unlabeled_dataset в labeled_dataset."""
-    from mmseg.datasets import BaseSegDataset
-
-    if not isinstance(labeled_dataset, BaseSegDataset):
-        raise TypeError('labeled_dataset should be an instance of BaseSegDataset.')
-    if not isinstance(unlabeled_dataset, BaseSegDataset):
-        raise TypeError('unlabeled_dataset should be an instance of BaseSegDataset.')
-
-    indices_to_add = [x[0] for x in top_uncertain]
-    new_samples = []
-    # Важно вынимать из data_list по убыванию индексов, чтобы не сбить нумерацию
-    for idx in sorted(indices_to_add, reverse=True):
-        data_info = unlabeled_dataset.data_list.pop(idx)
-        new_samples.append(data_info)
-
-    # Считаем, что "новые образцы" как бы разметили.
-    labeled_dataset.data_list.extend(new_samples)
-
-
-def main():
-    args = parse_args()
-
+def build_cfg(args):
+    """Загружаем и настраиваем конфиг (AMP, work_dir, ...)."""
     cfg = Config.fromfile(args.config)
     cfg.launcher = args.launcher
-    if args.cfg_options is not None:
+    if args.cfg_options:
         cfg.merge_from_dict(args.cfg_options)
 
     if args.work_dir is not None:
         cfg.work_dir = args.work_dir
     elif cfg.get('work_dir', None) is None:
-        cfg.work_dir = osp.join('./work_dirs',
-                                osp.splitext(osp.basename(args.config))[0])
+        cfg.work_dir = osp.join('./work_dirs', osp.splitext(osp.basename(args.config))[0])
 
-    if args.amp is True:
+    if args.amp:
         optim_wrapper = cfg.optim_wrapper.type
         if optim_wrapper == 'AmpOptimWrapper':
-            print_log('AMP training is already enabled in your config.',
-                      logger='current', level=logging.WARNING)
+            print_log('AMP is already enabled in config.', logger='current')
         else:
-            assert optim_wrapper == 'OptimWrapper', (
-                '`--amp` is only supported when the optimizer wrapper type is '
-                f'`OptimWrapper` but got {optim_wrapper}.')
+            assert optim_wrapper == 'OptimWrapper', '--amp only works if the optimizer is `OptimWrapper`.'
             cfg.optim_wrapper.type = 'AmpOptimWrapper'
             cfg.optim_wrapper.loss_scale = 'dynamic'
 
+    rank, _ = get_dist_info()
+    if rank == 0 and os.environ.get('TIMESTAMP', None) is None:
+        os.environ['TIMESTAMP'] = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+
+    if cfg.get('base_work_dir', None) is None:
+        cfg.base_work_dir = f"{cfg.work_dir}_{os.environ['TIMESTAMP']}"
+
+    # Сохраняем число AL-циклов
+    cfg.al_cycles = args.al_cycles
+    # По желанию:
     cfg.resume = args.resume
 
-    with open(f'{cfg.data_root}/mean_vals.txt', 'r') as f:
-        lines = f.readlines()
-    mean = [float(x) for x in lines[0].strip().split()]
-    std = [float(x) for x in lines[1].strip().split()]
-    cfg.model.data_preprocessor.mean = mean
-    cfg.model.data_preprocessor.std = std
+    return cfg
 
-    if args.active_learning:
-        active_learning_loop(cfg)
-    else:
+
+def main():
+    args = parse_args()
+
+    # Цикл по количеству шагов активного обучения
+    for al_cycle in range(args.al_cycles):
+        cfg = build_cfg(args)
+        cfg.al_cycle = al_cycle
+
+        # 1. Патчим конфиг (создаём step_{i}, подменяем ann_file => labeled.json)
+        patch_cfg(cfg)
+        os.makedirs(cfg.work_dir, exist_ok=True)
+
+        # 2. Сборка Runner
         if 'runner_type' not in cfg:
             runner = Runner.from_cfg(cfg)
         else:
             runner = RUNNERS.build(cfg)
+
+        # 3. Патчим Runner (меняем логи на step_{i} и т.д.)
+        patch_runner(runner, cfg)
+
+        # 4. Создаём или обновляем labeled.json/unlabeled.json
+        #    через JsonWriter (строим из cfg.json_writer)
+        if hasattr(cfg, 'json_writer'):
+            json_writer = MINERS.build(cfg.json_writer)
+            json_writer.al_cycle = al_cycle
+            json_writer.set_logger(runner.logger)
+
+            if al_cycle == 0:
+                # Первый цикл: создаём начальную выборку (initial_labeled_size)
+                json_writer.create_initial_data_partition(cfg.work_dir)
+            else:
+                # Последующие циклы: читаем scores.json, переносим top-K => labeled
+                scores_file = osp.join(cfg.base_work_dir, f'step_{al_cycle-1}', 'scores.json')
+                json_writer.create_data_partitions(scores_file=scores_file, save_dir=cfg.work_dir)
+        else:
+            runner.logger.warning('No `json_writer` found in config, skipping labeled/unlabeled partitioning.')
+
+        # 5. Запускаем обучение (теперь dataloader читает ann_file=step_{i}/labeled.json)
         runner.train()
 
+        # 6. Считаем score для неразмеченных (если нужно)
+        if hasattr(cfg, 'active_learning_dataloader'):
+            # Собираем unlabeled_dataloader
+            unlabeled_dataloader = Runner.build_dataloader(cfg.active_learning_dataloader)
+            results = al_scores_single_gpu(runner.model, unlabeled_dataloader,
+                                           runner.logger, cfg.work_dir, active_cycle=al_cycle)
+            # Сохраняем scores.json (чтобы на следующем шаге добавить top-K в labeled.json)
+            score_file = osp.join(cfg.work_dir, 'scores.json')
+            runner.logger.info(f'Saving scores.json to {score_file}')
+            dump(results, score_file)
 
 if __name__ == '__main__':
     main()
