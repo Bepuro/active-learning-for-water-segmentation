@@ -32,7 +32,7 @@ class LandcoverAI(BaseSegDataset):
             # Если ann_file не указан, возможно вернём пустой список (или ошибку).
             return []
         print("1")
-        json_path = osp.join(self.data_root, self.ann_file)  # data_root + ann_file
+        json_path = "." + self.ann_file.split("/.")[1]  # data_root + ann_file
         if not osp.isfile(json_path):
             raise FileNotFoundError(f"COCO-JSON file not found: {json_path}")
 

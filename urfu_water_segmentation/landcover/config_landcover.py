@@ -10,7 +10,6 @@ custom_imports = dict(
 
 dataset_type = 'LandcoverAI'  # <-- используем LandcoverAL (один класс)
 
-data_root = '/path/to/data_root'  # Укажите ваш путь
 crop_size = (512, 512)
 
 train_pipeline = [
@@ -67,7 +66,7 @@ val_dataloader = dict(
     num_workers=2,
     dataset=dict(
         type=dataset_type,
-        data_root=data_root,
+        data_root='/misc/home1/m_imm_freedata/Segmentation/Projects/mmseg_water/landcover.ai_512',
         ann_file='val.json',   # или val/images, val/gt и т.д.
         data_prefix=dict(img_path='val/images', seg_map_path='val/gt'),
         pipeline=test_pipeline
@@ -103,7 +102,7 @@ active_learning_dataloader = dict(
     num_workers=1,
     dataset=dict(
         type=dataset_type,
-        data_root=data_root,
+        data_root='/misc/home1/m_imm_freedata/Segmentation/Projects/mmseg_water/landcover.ai_512',
         ann_file='unlabeled.json',  # будет подменяться при AL
         data_prefix=dict(img_path='train/images', seg_map_path='train/gt'),
         pipeline=test_pipeline
