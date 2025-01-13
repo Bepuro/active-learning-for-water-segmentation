@@ -57,7 +57,7 @@ train_dataloader = dict(
         type='LandcoverAI',
         data_root='/misc/home1/m_imm_freedata/Segmentation/Projects/mmseg_water/landcover.ai_512',  
         ann_file='dataset_coco.json',      # <-- Пусть по умолчанию
-        pipeline=[ ... ]
+        pipeline=train_pipeline
     ),
     sampler=dict(type='DefaultSampler', shuffle=True)
 )
