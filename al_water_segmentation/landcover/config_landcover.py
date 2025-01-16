@@ -52,7 +52,7 @@ img_norm_cfg = dict(
 # Пайплайн обработки данных для тренировки
 train_pipeline = [
     dict(type='LoadImageFromFile'),
-    dict(type='LoadAnnotations', reduce_zero_label=False),
+    dict(type='LoadAnnotations'),
     dict(type='RandomResize', scale=(2048, 512), ratio_range=(0.5, 2.0), keep_ratio=True),
     dict(type='RandomCrop', crop_size=crop_size, cat_max_ratio=0.75),
     dict(type='RandomFlip', prob=0.5),
@@ -65,7 +65,7 @@ test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='Resize', scale=(2048, 512), keep_ratio=True),
     dict(type='ResizeToMultiple', size_divisor=32),
-    dict(type='LoadAnnotations', reduce_zero_label=False),
+    dict(type='LoadAnnotations'),
     dict(type='PackSegInputs')
 ]
 
